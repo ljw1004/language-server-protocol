@@ -16,6 +16,10 @@ The 1.x version of this document can be found [here](https://github.com/Microsof
 
 ## Change Log
 
+### 09/26/2017
+
+* Added optional `commitCharacters` property to the `CompletionItem`
+
 ### 02/28/2017
 
 * Make the `WorkspaceEdit` changes backwards compatible.
@@ -29,7 +33,7 @@ General
 * **New** :arrow_right: [initialized](#initialized)
 * :leftwards_arrow_with_hook: [shutdown](#shutdown)
 * :arrow_right: [exit](#exit)
-* :arrow_right: [$/cancelRequest](#cancelRequest)
+* :arrow_right: :arrow_left: [$/cancelRequest](#cancelRequest)
 
 Window
 
@@ -287,6 +291,8 @@ type DocumentUri = string;
 
 The current protocol is tailored for textual documents whose content can be represented as a string. There is currently no support for binary documents. A position inside a document (see Position definition below) is expressed as a zero-based line and character offset. The offsets are based on a UTF-16 string representation. So a string of the form `a𐐀b` the character offset of the character `a` is 0, the character offset of `𐐀` is 1 and the character offset of b is 3 since `𐐀` is represented using two code units in UTF-16. To ensure that both client and server split the string into the same line representation the protocol specifies the following end-of-line sequences: '\n', '\r\n' and '\r'.
 
+Positions are line end character agnostic. So you can not specify  a position that denotes `\r|\n` or `\n|` where `|` represents the character offset.
+
 ```typescript
 export const EOL: string[] = ['\n', '\r\n', '\r'];
 ```
@@ -303,14 +309,25 @@ interface Position {
 	line: number;
 
 	/**
-	 * Character offset on a line in a document (zero-based).
+	 * Character offset on a line in a document (zero-based). Assuming that the line is
+	 * represented as a string, the `character` value represents the gap between the
+	 * `character` and `character + 1`.
+	 *
+	 * If the character value is greater than the line length it defaults back to the
+	 * line length.
 	 */
 	character: number;
 }
 ```
 #### Range
 
-A range in a text document expressed as (zero-based) start and end positions. A range is comparable to a selection in an editor. Therefore the end position is exclusive.
+A range in a text document expressed as (zero-based) start and end positions. A range is comparable to a selection in an editor. Therefore the end position is exclusive. If you want to specify a range that contains a line including the line ending character(s) then use an end position denoting the start of the next line. For example:
+```typescript
+{
+    start: { line: 5, character: 23 }
+    end : { line 6, character : 0 }
+}
+```
 
 ```typescript
 interface Range {
@@ -440,7 +457,7 @@ If multiple `TextEdit`s are applied to a text document, all text edits describe 
 
 >#### New: TextDocumentEdit
 
-Describes textual changes on a single text document. The text document is referred to as a `VersionedTextDocumentIdentifier` to allow clients to check the text document version before an edit is applied.
+Describes textual changes on a single text document. The text document is referred to as a `VersionedTextDocumentIdentifier` to allow clients to check the text document version before an edit is applied. A `TextDocumentEdit` describes all changes on a version Si and after they are applied move the document to version Si+1. So the creator of a `TextDocumentEdit` doesn't need to sort the array or do any kind of ordering. However the edits must be non overlapping.
 
 ```typescript
 export interface TextDocumentEdit {
@@ -595,9 +612,9 @@ This section documents the actual language server protocol. It uses the followin
 
 #### Request, Notification and response ordering
 
-Responses for requests should be sent in the same order as the requests appear on the server or client side. So for example if a server receives a `textDocument/completion` request and then a `textDocument/signatureHelp` request it should first return the response for the `textDocument/completion` and then the reponse for `textDocument/signatureHelp`.
+Responses to requests should be sent in the roughly same order as the requests appear on the server or client side. So for example if a server receives a `textDocument/completion` request and then a `textDocument/signatureHelp` request it will usually first return the response for the `textDocument/completion` and then the response for `textDocument/signatureHelp`.
 
-How the server internally processes the requests is up to the server implementation. If the server decides to execute them in parallel and this produces correct result the server is free to do so. The server is also allowed to reorder requests and notification if the reordering doesn't affect correctness.
+However, the server may decide to use a parallel execution strategy and may wish to return responses in a different order than the requests were received. The server may do so as long as this reordering doesn't affect the correctness of the responses. For example, reordering the result of `textDocument/completion` and `textDocument/signatureHelp` is allowed, as these each of these requests usually won't affect the output of the other. On the other hand, the server most likely should not reorder `textDocument/definition` and `textDocument/rename` requests, since the executing the latter may affect the result of the former.
 
 #### Server lifetime
 
@@ -607,12 +624,12 @@ The current protocol specification defines that the lifetime of a server is mana
 
 The initialize request is sent as the first request from the client to the server. If the server receives request or notification before the `initialize` request it should act as follows:
 
-* for a request the respond should be errored with `code: -32002`. The message can be picked by the server.
-* notifications should be dropped, except for the exit notification. This will allow the exit a server without an initialize request.
+* For a request the response should be errored with `code: -32002`. The message can be picked by the server.
+* Notifications should be dropped, except for the exit notification. This will allow the exit a server without an initialize request.
 
-Until the server has responded to the `initialize` request with an `InitializeResult` the client must not sent any additional requests or notifications to the server. 
+Until the server has responded to the `initialize` request with an `InitializeResult`, the client must not send any additional requests or notifications to the server. 
 
->**Updated**: During the `initialize` request the server is allowed to sent the notifications `window/showMessage`, `window/logMessage` and `telemetry/event` as well as the `window/showMessageRequest` request to the client.
+>**Updated**: During the `initialize` request the server is allowed to send the notifications `window/showMessage`, `window/logMessage` and `telemetry/event` as well as the `window/showMessageRequest` request to the client.
 
 _Request_:
 * method: 'initialize'
@@ -780,7 +797,18 @@ export interface TextDocumentClientCapabilities {
 			 * that is typing in one will update others too.
 			 */
 			snippetSupport?: boolean;
+
+			/**
+			 * Client supports commit characters on a completion item.
+			 */
+			commitCharactersSupport?: boolean			
 		}
+
+		/**
+		 * The client supports to send additional context information for a
+		 * `textDocument/completion` requestion.
+		 */
+		contextSupport?: boolean;		
 	};
 
 	/**
@@ -1089,7 +1117,7 @@ export interface TextDocumentSyncOptions {
 	 */
 	openClose?: boolean;
 	/**
-	 * Change notificatins are sent to the server. See TextDocumentSyncKind.None, TextDocumentSyncKind.Full
+	 * Change notifications are sent to the server. See TextDocumentSyncKind.None, TextDocumentSyncKind.Full
 	 * and TextDocumentSyncKindIncremental.
 	 */
 	change?: number;
@@ -1267,7 +1295,7 @@ _Request_:
 * params: `ShowMessageRequestParams` defined as follows:
 
 _Response_:
-* result: the selected `MessageActionItem`
+* result: the selected `MessageActionItem` | `null` if none got selected.
 * error: code and message set in case an exception happens during showing a message.
 
 ```typescript
@@ -1344,7 +1372,7 @@ Where `RegistrationParams` are defined as follows:
 
 ```typescript
 /**
- * General paramters to register for a capability.
+ * General parameters to register for a capability.
  */
 export interface Registration {
 	/**
@@ -1455,6 +1483,9 @@ An example JSON RPC message to unregister the above registered `textDocument/wil
 	}
 }
 ```
+_Response_:
+* result: void.
+* error: code and message set in case an exception happens during the request.
 
 #### <a name="workspace_didChangeConfiguration"></a>DidChangeConfiguration Notification
 
@@ -1473,9 +1504,164 @@ interface DidChangeConfigurationParams {
 }
 ```
 
+
+#### <a name="workspace_didChangeWatchedFiles"></a>DidChangeWatchedFiles Notification
+
+The watched files notification is sent from the client to the server when the client detects changes to files watched by the language client.
+
+_Notification_:
+* method: 'workspace/didChangeWatchedFiles'
+* params: `DidChangeWatchedFilesParams` defined as follows:
+```typescript
+interface DidChangeWatchedFilesParams {
+	/**
+	 * The actual file events.
+	 */
+	changes: FileEvent[];
+}
+```
+
+Where FileEvents are described as follows:
+
+```typescript
+/**
+ * An event describing a file change.
+ */
+interface FileEvent {
+	/**
+	 * The file's URI.
+	 */
+	uri: DocumentUri;
+	/**
+	 * The change type.
+	 */
+	type: number;
+}
+
+/**
+ * The file event type.
+ */
+export namespace FileChangeType {
+	/**
+	 * The file got created.
+	 */
+	export const Created = 1;
+	/**
+	 * The file got changed.
+	 */
+	export const Changed = 2;
+	/**
+	 * The file got deleted.
+	 */
+	export const Deleted = 3;
+}
+```
+
+
+#### <a name="workspace_symbol"></a>Workspace Symbols Request
+
+The workspace symbol request is sent from the client to the server to list project-wide symbols matching the query string.
+
+_Request_:
+* method: 'workspace/symbol'
+* params: `WorkspaceSymbolParams` defined as follows:
+```typescript
+/**
+ * The parameters of a Workspace Symbol Request.
+ */
+interface WorkspaceSymbolParams {
+	/**
+	 * A non-empty query string
+	 */
+	query: string;
+}
+```
+
+_Response_:
+* result: `SymbolInformation[]` as defined above.
+* error: code and message set in case an exception happens during the workspace symbol request.
+
+_Registration Options_: void
+
+
+#### <a name="workspace_executeCommand"></a>Execute a command
+
+The `workspace/executeCommand` request is sent from the client to the server to trigger command execution on the server. In most cases
+the server creates a `WorkspaceEdit` structure and applies the changes to the workspace using the request `workspace/applyEdit` which is
+sent from the server to the client.
+
+_Request:_
+* method: 'workspace/executeCommand'
+* params: `ExecuteCommandParams` defined as follows:
+
+```typescript
+export interface ExecuteCommandParams {
+
+	/**
+	 * The identifier of the actual command handler.
+	 */
+	command: string;
+	/**
+	 * Arguments that the command should be invoked with.
+	 */
+	arguments?: any[];
+}
+```
+
+The arguments are typically specified when a command is returned from the server to the client. Example requests that return a command are `textDocument/codeAction` or `textDocument/codeLens`.
+
+_Response_:
+* result: `null` | `any`
+* error: code and message set in case an exception happens during the request.
+
+_Registration Options_: `ExecuteCommandRegistrationOptions` defined as follows:
+
+```typescript
+/**
+ * Execute command registration options.
+ */
+export interface ExecuteCommandRegistrationOptions {
+	/**
+	 * The commands to be executed on the server
+	 */
+	commands: string[]
+}
+```
+
+
+#### <a name="workspace_applyEdit"></a>Applies a WorkspaceEdit
+
+The `workspace/applyEdit` request is sent from the server to the client to modify resource on the client side.
+
+_Request_:
+* method: 'workspace/applyEdit'
+* params: `ApplyWorkspaceEditParams` defined as follows:
+
+```typescript
+export interface ApplyWorkspaceEditParams {
+	/**
+	 * The edits to apply.
+	 */
+	edit: WorkspaceEdit;
+}
+```
+
+_Response_:
+* result: `ApplyWorkspaceEditResponse` defined as follows:
+```typescript
+export interface ApplyWorkspaceEditResponse {
+	/**
+	 * Indicates whether the edit was applied or not.
+	 */
+	applied: boolean;
+}
+```
+* error: code and message set in case an exception happens during the request.
+
+
 #### <a name="textDocument_didOpen"></a>DidOpenTextDocument Notification
 
-The document open notification is sent from the client to the server to signal newly opened text documents. The document's truth is now managed by the client and the server must not try to read the document's truth using the document's uri.
+The document open notification is sent from the client to the server to signal newly opened text documents. The document's truth is now managed by the client and the server must not try to read the document's truth using the document's uri. Open in this sense means it is managed by the client. It doesn't necessarily mean that its content is presented in an editor. An open notification must not be sent more than once without a corresponding close notification send before. This means open and close notification must be balanced and the max open count is one. 
 
 _Notification_:
 * method: 'textDocument/didOpen'
@@ -1491,6 +1677,7 @@ interface DidOpenTextDocumentParams {
 ```
 
 _Registration Options_: `TextDocumentRegistrationOptions`
+
 
 #### <a name="textDocument_didChange"></a>DidChangeTextDocument Notification
 
@@ -1512,7 +1699,9 @@ interface DidChangeTextDocumentParams {
 	textDocument: VersionedTextDocumentIdentifier;
 
 	/**
-	 * The actual content changes.
+	 * The actual content changes. The content changes descibe single state changes
+	 * to the document. So if there are two content changes c1 and c2 for a document 
+	 * in state S10 then c1 move the document to S11 and c2 to S12.
 	 */
 	contentChanges: TextDocumentContentChangeEvent[];
 }
@@ -1654,7 +1843,7 @@ export interface TextDocumentSaveRegistrationOptions extends TextDocumentRegistr
 
 #### <a name="textDocument_didClose"></a>DidCloseTextDocument Notification
 
-The document close notification is sent from the client to the server when the document got closed in the client. The document's truth now exists where the document's uri points to (e.g. if the document's uri is a file uri the truth now exists on disk).
+The document close notification is sent from the client to the server when the document got closed in the client. The document's truth now exists where the document's uri points to (e.g. if the document's uri is a file uri the truth now exists on disk). As with the open notification the close notification is about managing the document's content. Receiving a close notification doesn't mean that the document was open in an editor before. A close notification requires a previous open notifaction to be sent.
 
 _Notification_:
 * method: 'textDocument/didClose'
@@ -1671,61 +1860,17 @@ interface DidCloseTextDocumentParams {
 
 _Registration Options_: `TextDocumentRegistrationOptions`
 
-#### <a name="workspace_didChangeWatchedFiles"></a>DidChangeWatchedFiles Notification
-
-The watched files notification is sent from the client to the server when the client detects changes to files watched by the language client.
-
-_Notification_:
-* method: 'workspace/didChangeWatchedFiles'
-* params: `DidChangeWatchedFilesParams` defined as follows:
-```typescript
-interface DidChangeWatchedFilesParams {
-	/**
-	 * The actual file events.
-	 */
-	changes: FileEvent[];
-}
-```
-
-Where FileEvents are described as follows:
-
-```typescript
-/**
- * An event describing a file change.
- */
-interface FileEvent {
-	/**
-	 * The file's URI.
-	 */
-	uri: DocumentUri;
-	/**
-	 * The change type.
-	 */
-	type: number;
-}
-
-/**
- * The file event type.
- */
-export namespace FileChangeType {
-	/**
-	 * The file got created.
-	 */
-	export const Created = 1;
-	/**
-	 * The file got changed.
-	 */
-	export const Changed = 2;
-	/**
-	 * The file got deleted.
-	 */
-	export const Deleted = 3;
-}
-```
 
 #### <a name="textDocument_publishDiagnostics"></a>PublishDiagnostics Notification
 
 Diagnostics notification are sent from the server to the client to signal results of validation runs.
+
+Diagnostics are "owned" by the server so it is the server's responsibility to clear them if necessary. The following rule is used for VS Code servers that generate diagnostics:
+
+* if a language is single file only (for example HTML) then diagnostics are cleared by the server when the file is closed.
+* if a language has a project system (for example C#) diagnostics are not cleared when a file closes. When a project is opened all diagnostics for all files are recomputed (or read from a cache).
+
+When a file changes it is the server's responsibility to re-compute diagnostics and push them to the client. If the computed set is empty it has to push the empty array to clear former diagnostics. Newly pushed diagnostics always replace previously pushed diagnostics. There is no merging that happens on the client side. 
 
 _Notification_:
 * method: 'textDocument/publishDiagnostics'
@@ -1751,7 +1896,51 @@ The Completion request is sent from the client to the server to compute completi
 
 _Request_:
 * method: 'textDocument/completion'
-* params: [`TextDocumentPositionParams`](#textdocumentpositionparams)
+* params: `CompletionParams` defined as follows:
+
+```typescript
+export interface CompletionParams extends TextDocumentPositionParams {
+
+	/**
+	 * The completion context. This is only available it the client specifies
+	 * to send this using `ClientCapabilities.textDocument.completion.contextSupport === true`
+	 */
+	context?: CompletionContext;
+}
+
+/**
+ * How a completion was triggered
+ */
+export namespace CompletionTriggerKind {
+	/**
+	 * Completion was triggered by invoking it manuall or using API.
+	 */
+	export const Invoked: 1 = 1;
+
+	/**
+	 * Completion was triggered by a trigger character.
+	 */
+	export const TriggerCharacter: 2 = 2;
+}
+export type CompletionTriggerKind = 1 | 2;
+
+
+/**
+ * Contains additional information about the context in which a completion request is triggered.
+ */
+export interface CompletionContext {
+	/**
+	 * How the completion was triggered.
+	 */
+	triggerKind: CompletionTriggerKind;
+
+	/**
+	 * The trigger character (a single character) that has trigger code complete.
+	 * Is undefined if `triggerKind !== CompletionTriggerKind.TriggerCharacter`
+	 */
+	triggerCharacter?: string;
+}
+```
 
 _Response_:
 * result: `CompletionItem[] | CompletionList`
@@ -1853,6 +2042,12 @@ interface CompletionItem {
 	 */
 	additionalTextEdits?: TextEdit[];
 	/**
+	 * An optional set of characters that when pressed while this completion is active will accept it first and
+	 * then type that character. *Note* that all commit characters should have `length=1` and that superfluous
+	 * characters will be ignored.
+	 */
+	commitCharacters?: string[];
+	/**
 	 * An optional command that is executed *after* inserting this completion. *Note* that
 	 * additional modifications to the current document should be described with the
 	 * additionalTextEdits-property.
@@ -1929,7 +2124,7 @@ _Request_:
 * params: [`TextDocumentPositionParams`](#textdocumentpositionparams)
 
 _Response_:
-* result: `Hover` defined as follows:
+* result: `null` | `Hover` defined as follows:
 
 ```typescript
 /**
@@ -1981,7 +2176,7 @@ _Request_:
 * params: [`TextDocumentPositionParams`](#textdocumentpositionparams)
 
 _Response_:
-* result: `SignatureHelp` defined as follows:
+* result: `null` | `SignatureHelp` defined as follows:
 
 ```typescript
 /**
@@ -2084,7 +2279,7 @@ _Request_:
 * params: [`TextDocumentPositionParams`](#textdocumentpositionparams)
 
 _Response_:
-* result: [`Location`](#location) | [`Location`](#location)[]
+* result: [`Location`](#location) | [`Location`](#location)[] | `null`
 * error: code and message set in case an exception happens during the definition request.
 
 _Registration Options_: `TextDocumentRegistrationOptions`
@@ -2175,7 +2370,7 @@ _Registration Options_: `TextDocumentRegistrationOptions`
 
 #### <a name="textDocument_documentSymbol"></a>Document Symbols Request
 
-The document symbol request is sent from the client to the server to list all symbols found in a given text document.
+The document symbol request is sent from the client to the server to return a flat list of all symbols found in a given text document. Neither the document's location range nor the documents container name should be used to reinfer a hierarchy.
 
 _Request_:
 * method: 'textDocument/documentSymbol'
@@ -2208,12 +2403,23 @@ interface SymbolInformation {
 	kind: number;
 
 	/**
-	 * The location of this symbol.
+	 * The location of this symbol. The location's range is used by a tool
+	 * to reveal the location in the editor. If the symbol is selected in the
+	 * tool the range's start information is used to position the cursor. So
+	 * the range usually spwans more then the actual symbol's name and does
+	 * normally include thinks like visibility modifiers.
+	 *
+	 * The range doesn't have to denote a node range in the sense of a abstract
+	 * syntax tree. It can therefore not be used to re-construct a hierarchy of
+	 * the symbols.
 	 */
 	location: Location;
 
 	/**
-	 * The name of the symbol containing this symbol.
+	 * The name of the symbol containing this symbol. This information is for
+	 * user interface purposes (e.g. to render a qaulifier in the user interface
+	 * if necessary). It can't be used to re-infer a hierarchy for the document
+	 * symbols.
 	 */
 	containerName?: string;
 }
@@ -2246,31 +2452,6 @@ export namespace SymbolKind {
 * error: code and message set in case an exception happens during the document symbol request.
 
 _Registration Options_: `TextDocumentRegistrationOptions`
-
-#### <a name="workspace_symbol"></a>Workspace Symbols Request
-
-The workspace symbol request is sent from the client to the server to list project-wide symbols matching the query string.
-
-_Request_:
-* method: 'workspace/symbol'
-* params: `WorkspaceSymbolParams` defined as follows:
-```typescript
-/**
- * The parameters of a Workspace Symbol Request.
- */
-interface WorkspaceSymbolParams {
-	/**
-	 * A non-empty query string
-	 */
-	query: string;
-}
-```
-
-_Response_:
-* result: `SymbolInformation[]` as defined above.
-* error: code and message set in case an exception happens during the workspace symbol request.
-
-_Registration Options_: void
 
 #### <a name="textDocument_codeAction"></a>Code Action Request
 
@@ -2608,80 +2789,7 @@ interface RenameParams {
 ```
 
 _Response_:
-* result: [`WorkspaceEdit`](#workspaceedit) describing the modification to the workspace.
+* result: `null` | [`WorkspaceEdit`](#workspaceedit) describing the modification to the workspace.
 * error: code and message set in case an exception happens during the rename request.
 
 _Registration Options_: `TextDocumentRegistrationOptions`
-
-#### <a name="workspace_executeCommand"></a>Execute a command
-
-The `workspace/executeCommand` request is sent from the client to the server to trigger command execution on the server. In most cases
-the server creates a `WorkspaceEdit` structure and applies the changes to the workspace using the request `workspace/applyEdit` which is
-sent from the server to the client.
-
-_Request:_
-* method: 'workspace/executeCommand'
-* params: `ExecuteCommandParams` defined as follows:
-
-```typescript
-export interface ExecuteCommandParams {
-
-	/**
-	 * The identifier of the actual command handler.
-	 */
-	command: string;
-	/**
-	 * Arguments that the command should be invoked with.
-	 */
-	arguments?: any[];
-}
-```
-
-The arguments are typically specified when a command is returned from the server to the client. Example requests that return a command are `textDocument/codeAction` or `textDocument/codeLens`.
-
-_Response_:
-* result: any
-* error: code and message set in case an exception happens during the request.
-
-_Registration Options_: `ExecuteCommandRegistrationOptions` defined as follows:
-
-```typescript
-/**
- * Execute command registration options.
- */
-export interface ExecuteCommandRegistrationOptions {
-	/**
-	 * The commands to be executed on the server
-	 */
-	commands: string[]
-}
-```
-
-#### <a name="workspace_applyEdit"></a>Applies a WorkspaceEdit
-
-The `workspace/applyEdit` request is sent from the server to the client to modify resource on the client side.
-
-_Request_:
-* method: 'workspace/applyEdit'
-* params: `ApplyWorkspaceEditParams` defined as follows:
-
-```typescript
-export interface ApplyWorkspaceEditParams {
-	/**
-	 * The edits to apply.
-	 */
-	edit: WorkspaceEdit;
-}
-```
-
-_Response_:
-* result: `ApplyWorkspaceEditResponse` defined as follows:
-```typescript
-export interface ApplyWorkspaceEditResponse {
-	/**
-	 * Indicates whether the edit was applied or not.
-	 */
-	applied: boolean;
-}
-```
-* error: code and message set in case an exception happens during the request.
